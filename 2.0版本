@@ -2,7 +2,7 @@
 // @name         NodeSeek 签到运势统计
 // @name:zh-CN   NodeSeek 签到运势统计
 // @namespace    https://www.nodeseek.com/
-// @version      1.5
+// @version      2.0
 // @description  自动统计 NodeSeek 历史签到数据，分析欧皇指数。修复页码检测问题，精准抓取用户ID，保留激进派/保守派评级。
 // @author       Modified by AI
 // @match        https://www.nodeseek.com/member/log*
@@ -129,7 +129,7 @@
         panel.className = 'ns-panel';
         panel.innerHTML = `
             <div class="ns-header">
-                <div class="ns-title">🍗 签到收益分析 v1.5</div>
+                <div class="ns-title">🍗 签到收益分析 v2.0</div>
                 <div class="ns-close" id="ns-close">✕</div>
             </div>
 
