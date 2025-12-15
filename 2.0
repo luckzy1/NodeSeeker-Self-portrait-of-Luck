@@ -1,0 +1,538 @@
+// ==UserScript==
+// @name         NodeSeek 签到运势统计
+// @name:zh-CN   NodeSeek 签到运势统计
+// @namespace    https://www.nodeseek.com/
+// @version      1.5
+// @description  自动统计 NodeSeek 历史签到数据，分析欧皇指数。修复页码检测问题，精准抓取用户ID，保留激进派/保守派评级。
+// @author       Modified by AI
+// @match        https://www.nodeseek.com/member/log*
+// @match        https://nodeseek.com/member/log*
+// @match        https://www.nodeseek.com/credit*
+// @match        https://nodeseek.com/credit*
+// @icon         https://www.nodeseek.com/static/image/favicon/android-chrome-192x192.png
+// @grant        GM_setClipboard
+// @run-at       document-end
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    const KEY_DATA = 'ns_signin_data_v5';
+    const KEY_STATE = 'ns_signin_state_v5';
+
+    // 状态管理
+    let state = JSON.parse(localStorage.getItem(KEY_STATE)) || {
+        isRunning: false,
+        targetPage: 0,
+        maxPage: 1,
+        startPage: 1
+    };
+    let allRecords = JSON.parse(localStorage.getItem(KEY_DATA)) || [];
+
+    // --- 入口 ---
+    window.addEventListener('load', () => {
+        setTimeout(() => {
+            injectStyles();
+            initBtn();
+            if (state.isRunning) {
+                createControlPanel();
+                processPage();
+            }
+        }, 1500);
+    });
+
+    // --- 1. 样式注入 ---
+    function injectStyles() {
+        if (document.getElementById('ns-style')) return;
+        const style = document.createElement('style');
+        style.id = 'ns-style';
+        style.innerHTML = `
+            :root {
+                --ns-bg: rgba(255, 255, 255, 0.98);
+                --ns-primary: #FF9500;
+                --ns-text: #1d1d1f;
+                --ns-subtext: #86868b;
+                --ns-border: #d2d2d7;
+            }
+            .ns-panel {
+                position: fixed; top: 100px; right: 20px; width: 360px;
+                background: var(--ns-bg); backdrop-filter: blur(12px);
+                border: 1px solid rgba(0,0,0,0.1); border-radius: 18px;
+                box-shadow: 0 12px 40px rgba(0, 0, 0, 0.15);
+                font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+                padding: 24px; z-index: 99999; display: flex; flex-direction: column;
+                animation: ns-fade 0.3s ease-out; color: var(--ns-text);
+            }
+            @keyframes ns-fade { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
+            .ns-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+            .ns-title { font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+            .ns-close { cursor: pointer; color: var(--ns-subtext); font-size: 22px; transition: 0.2s; line-height: 1; }
+            .ns-close:hover { color: var(--ns-text); }
+            .ns-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+            .ns-stat { background: #f5f5f7; padding: 14px; border-radius: 12px; text-align: center; border: 1px solid rgba(0,0,0,0.03); }
+            .ns-stat-val { font-size: 22px; font-weight: 800; color: var(--ns-primary); margin-top: 6px; letter-spacing: -0.5px; }
+            .ns-stat-label { font-size: 12px; color: var(--ns-subtext); font-weight: 600; text-transform: uppercase; }
+            .ns-input-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; padding: 0 4px; }
+            .ns-input { width: 80px; padding: 8px; border-radius: 8px; border: 1px solid var(--ns-border); text-align: center; font-size: 15px; font-weight: 600; }
+            .ns-btn { width: 100%; padding: 14px; border: none; border-radius: 12px; color: white; font-weight: 600; cursor: pointer; margin-bottom: 10px; font-size: 15px; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+            .ns-btn:hover { opacity: 0.95; transform: translateY(-1px); }
+            .ns-btn-start { background: linear-gradient(135deg, #34C759, #30D158); }
+            .ns-btn-stop { background: linear-gradient(135deg, #FF3B30, #FF453A); }
+            .ns-btn-copy { background: linear-gradient(135deg, #007AFF, #0062CC); }
+            .ns-btn-clear { background: transparent; color: var(--ns-subtext); border: 1px solid var(--ns-border); box-shadow: none; font-size: 13px; padding: 10px; }
+            .ns-btn-clear:hover { background: #f5f5f7; border-color: #FF3B30; color: #FF3B30; }
+            .ns-progress-wrap { margin-bottom: 10px; }
+            .ns-progress { height: 6px; background: #e5e5ea; border-radius: 3px; overflow: hidden; }
+            .ns-fill { height: 100%; background: var(--ns-primary); width: 0%; transition: width 0.3s ease; }
+            .ns-status { text-align: center; font-size: 12px; color: var(--ns-subtext); margin-top: 6px; }
+            .ns-textarea { width: 100%; height: 250px; margin: 15px 0; padding: 12px; border-radius: 12px; border: 1px solid var(--ns-border); font-family: 'Menlo', 'Monaco', monospace; font-size: 12px; resize: none; background: #fbfbfb; display: none; line-height: 1.4; color: #333; }
+            .ns-textarea.show { display: block; }
+        `;
+        document.head.appendChild(style);
+    }
+
+    // --- 2. 悬浮按钮 ---
+    function initBtn() {
+        if (document.getElementById('ns-entry-btn')) return;
+        const btn = document.createElement('div');
+        btn.id = 'ns-entry-btn';
+        btn.innerHTML = '🍗';
+        btn.style.cssText = `
+            position: fixed; bottom: 80px; right: 30px; width: 52px; height: 52px;
+            background: white; border-radius: 50%; text-align: center; line-height: 52px;
+            font-size: 26px; cursor: pointer; z-index: 99998;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15); transition: transform 0.2s;
+            border: 1px solid rgba(0,0,0,0.05); user-select: none;
+        `;
+        btn.onclick = () => {
+            if (document.getElementById('ns-panel')) {
+                document.getElementById('ns-panel').remove();
+            } else {
+                createControlPanel();
+            }
+        };
+        btn.onmouseover = () => btn.style.transform = 'scale(1.1) rotate(12deg)';
+        btn.onmouseout = () => btn.style.transform = 'scale(1) rotate(0deg)';
+        document.body.appendChild(btn);
+    }
+
+    // --- 3. 控制面板 ---
+    function createControlPanel() {
+        if (document.getElementById('ns-panel')) return;
+
+        const curPage = getUrlPage();
+        const detectedMax = detectTotalPages();
+        const displayMax = Math.max(detectedMax, state.maxPage, 1);
+
+        const panel = document.createElement('div');
+        panel.id = 'ns-panel';
+        panel.className = 'ns-panel';
+        panel.innerHTML = `
+            <div class="ns-header">
+                <div class="ns-title">🍗 签到收益分析 v1.5</div>
+                <div class="ns-close" id="ns-close">✕</div>
+            </div>
+
+            <div id="ns-config" style="${state.isRunning ? 'display:none' : ''}">
+                <div class="ns-input-row">
+                    <span style="font-size:14px; font-weight:600; color:#444;">计划扫描页数:</span>
+                    <input type="number" id="ns-pages" class="ns-input" value="${displayMax}" min="1">
+                </div>
+                <div style="font-size:12px; color:#999; margin-bottom:15px; text-align:right;">*自动检测到共 ${detectedMax} 页</div>
+            </div>
+
+            <div class="ns-grid">
+                <div class="ns-stat">
+                    <div class="ns-stat-label">已采集签到</div>
+                    <div class="ns-stat-val" id="ns-count">${allRecords.length}</div>
+                </div>
+                <div class="ns-stat">
+                    <div class="ns-stat-label">页码进度</div>
+                    <div class="ns-stat-val" style="color:#007AFF" id="ns-page-txt">${curPage} / ${state.isRunning ? state.maxPage : displayMax}</div>
+                </div>
+            </div>
+
+            <div class="ns-progress-wrap">
+                <div class="ns-progress">
+                    <div class="ns-fill" id="ns-bar"></div>
+                </div>
+                <div class="ns-status" id="ns-status">
+                    ${state.isRunning ? '正在全力扫描中...' : '准备就绪，点击开始'}
+                </div>
+            </div>
+
+            <textarea id="ns-result-area" class="ns-textarea" readonly></textarea>
+
+            <div id="ns-actions">
+                ${state.isRunning
+                    ? `<button class="ns-btn ns-btn-stop" id="ns-stop">⏹ 停止扫描</button>`
+                    : `<button class="ns-btn ns-btn-start" id="ns-start">▶ 开始分析</button>`
+                }
+            </div>
+
+            <div id="ns-copy-btn-area" style="display:none;">
+                 <button class="ns-btn ns-btn-copy" id="ns-copy">📄 复制完整报告</button>
+            </div>
+
+            <button class="ns-btn ns-btn-clear" id="ns-clear">🗑️ 清空缓存数据</button>
+        `;
+        document.body.appendChild(panel);
+
+        document.getElementById('ns-close').onclick = () => panel.remove();
+        document.getElementById('ns-clear').onclick = clearData;
+        const btnCopy = document.getElementById('ns-copy');
+        if (btnCopy) btnCopy.onclick = copyResult;
+
+        const btnStart = document.getElementById('ns-start');
+        if(btnStart) btnStart.onclick = startExtraction;
+
+        const btnStop = document.getElementById('ns-stop');
+        if(btnStop) btnStop.onclick = stopExtraction;
+
+        updateUI();
+        if (!state.isRunning && allRecords.length > 0) showResultArea();
+    }
+
+    // --- 4. 核心逻辑 (修复页码检测与用户ID) ---
+
+    // 修复1: 深度用户ID获取
+    function getUserInfo() {
+        // 策略1: 优先匹配侧边栏的用户信息（常见于 /credit 页面）
+        const sideUserLink = document.querySelector('.side-box .username') ||
+                             document.querySelector('.user-info .username') ||
+                             document.querySelector('.sidebar a[href^="/space/"]');
+
+        if (sideUserLink) {
+             const match = sideUserLink.href.match(/\/space\/(\d+)/);
+             if (match) return `${sideUserLink.innerText.trim()} (UID: ${match[1]})`;
+        }
+
+        // 策略2: 遍历所有指向 /space/ 的链接，寻找特征最明显的
+        const links = document.querySelectorAll('a[href^="/space/"]');
+        for (const link of links) {
+            // 排除纯头像或无关链接，优先找有文本的
+            if (link.innerText.trim() && link.closest('.user-card')) {
+                 const match = link.href.match(/\/space\/(\d+)/);
+                 if (match) return `${link.innerText.trim()} (UID: ${match[1]})`;
+            }
+        }
+
+        // 保底: 尝试从 URL 或 顶部导航
+        const navUser = document.querySelector('a.nav-link[href^="/space/"]');
+        if (navUser) {
+             const match = navUser.href.match(/\/space\/(\d+)/);
+             if (match) return `${navUser.innerText.trim()} (UID: ${match[1]})`;
+        }
+
+        return "NodeSeeker";
+    }
+
+    function getUrlPage() {
+        const hashMatch = window.location.hash.match(/p-(\d+)/);
+        if (hashMatch) return parseInt(hashMatch[1]);
+        const params = new URLSearchParams(window.location.search);
+        return parseInt(params.get('page')) || 1;
+    }
+
+    // 修复2: 深度页码检测 (支持 href 扫描)
+    function detectTotalPages() {
+        const pagination = document.querySelector('.pagination') || document.querySelector('div[role="navigation"]');
+        if (!pagination) return 1;
+
+        let max = 1;
+
+        // 方式 A: 扫描文本数字 (含 span, li, a, div)
+        const elements = pagination.querySelectorAll('a, li, div, span, strong');
+        elements.forEach(el => {
+            const txt = el.innerText.trim().replace(/\.\./g, '');
+            // 严格匹配纯数字，防止误读
+            if (/^\d+$/.test(txt)) {
+                const num = parseInt(txt);
+                if (num > max) max = num;
+            }
+        });
+
+        // 方式 B: 扫描链接 href (解决 "末页" 按钮是图标或文字不包含数字的问题)
+        // 查找所有带 page 参数的链接
+        const links = pagination.querySelectorAll('a[href]');
+        links.forEach(el => {
+            const href = el.getAttribute('href');
+            if (href) {
+                // 匹配 ?page=62 或 /p-62
+                const match = href.match(/[?&]page=(\d+)/) || href.match(/\/p-(\d+)/) || href.match(/\/comments\/(\d+)/);
+                if (match) {
+                    const num = parseInt(match[1]);
+                    if (num > max) max = num;
+                }
+            }
+        });
+
+        return max;
+    }
+
+    function startExtraction() {
+        const inputPages = parseInt(document.getElementById('ns-pages').value) || 1;
+        const curPage = getUrlPage();
+        const detectedMax = detectTotalPages();
+        let maxTarget = Math.max(inputPages, detectedMax);
+
+        state = {
+            isRunning: true,
+            startPage: curPage,
+            targetPage: curPage,
+            maxPage: maxTarget
+        };
+
+        allRecords = [];
+        saveState();
+        saveData();
+
+        const panel = document.getElementById('ns-panel');
+        if (panel) panel.remove();
+        createControlPanel();
+        processPage();
+    }
+
+    function stopExtraction() {
+        state.isRunning = false;
+        saveState();
+        updateStatus("⚠️ 已暂停");
+        const panel = document.getElementById('ns-panel');
+        if (panel) panel.remove();
+        createControlPanel();
+    }
+
+    function processPage() {
+        if (!state.isRunning) return;
+
+        // 动态修正：每次翻页都再次检查最大页数，防止第一页检测不准
+        const currentRealMax = detectTotalPages();
+        if (currentRealMax > state.maxPage) {
+            state.maxPage = currentRealMax;
+            saveState();
+        }
+
+        updateUI();
+        updateStatus(`正在提取第 ${state.targetPage} 页 / 共 ${state.maxPage} 页...`);
+
+        const records = extractTableData();
+        if (records.length > 0) {
+            allRecords = allRecords.concat(records);
+            saveData();
+        }
+
+        if (state.targetPage < state.maxPage) {
+            state.targetPage++;
+            saveState();
+            setTimeout(() => {
+                if (window.location.hash.includes('p-')) {
+                    window.location.hash = `#/p-${state.targetPage}`;
+                    window.location.reload();
+                } else {
+                    const nextUrl = new URL(window.location.href);
+                    nextUrl.searchParams.set('page', state.targetPage);
+                    window.location.href = nextUrl.toString();
+                }
+            }, 800 + Math.random() * 600);
+        } else {
+            finish();
+        }
+    }
+
+    function extractTableData() {
+        const rows = document.querySelectorAll('table tbody tr');
+        const results = [];
+        rows.forEach(row => {
+            const cols = row.querySelectorAll('td');
+            if (cols.length < 4) return;
+            const changeText = cols[0].innerText.trim();
+            const reason = cols[2].innerText.trim();
+            const time = cols[3].innerText.trim();
+            const changeVal = parseInt(changeText);
+
+            if (reason.includes('签到收益') && changeVal > 0 && !reason.includes('分享')) {
+                results.push({
+                    change: changeVal,
+                    reason: reason,
+                    time: time
+                });
+            }
+        });
+        return results;
+    }
+
+    function finish() {
+        state.isRunning = false;
+        saveState();
+        const panel = document.getElementById('ns-panel');
+        if (panel) panel.remove();
+        createControlPanel();
+        updateStatus("✨ 扫描完成！");
+        showResultArea();
+    }
+
+    function showResultArea() {
+        const txt = generateReportText();
+        const area = document.getElementById('ns-result-area');
+        const copyBtnDiv = document.getElementById('ns-copy-btn-area');
+        const actionsDiv = document.getElementById('ns-actions');
+
+        if (area) {
+            area.value = txt;
+            area.classList.add('show');
+        }
+        if (copyBtnDiv) copyBtnDiv.style.display = 'block';
+        if (actionsDiv) actionsDiv.style.display = 'none';
+    }
+
+    function copyResult() {
+        const area = document.getElementById('ns-result-area');
+        if (area) {
+            area.select();
+            document.execCommand('copy');
+            updateStatus("✅ 已复制！");
+            setTimeout(() => updateStatus("✨ 扫描完成！"), 2000);
+        }
+    }
+
+    // --- 5. 报告生成 ---
+    function generateReportText() {
+        if (allRecords.length === 0) return "未找到符合条件的签到收益数据。";
+
+        let total = 0;
+        let max = -999;
+        let min = 999;
+        let luckyDays = 0; // >=8
+        let superLuckyDays = 0; // >=20
+        let fiveCount = 0; // 统计5鸡腿次数
+
+        allRecords.forEach(r => {
+            total += r.change;
+            if (r.change > max) max = r.change;
+            if (r.change < min) min = r.change;
+            if (r.change >= 8) luckyDays++;
+            if (r.change >= 20) superLuckyDays++;
+            if (r.change === 5) fiveCount++;
+        });
+
+        const totalDays = allRecords.length;
+        const avg = (total / totalDays).toFixed(2);
+        const userInfo = getUserInfo();
+        const rating = getRating(parseFloat(avg));
+
+        const fivePercent = ((fiveCount / totalDays) * 100).toFixed(1);
+        const isConservative = parseFloat(fivePercent) >= 50;
+        const isRadical = parseFloat(fivePercent) < 50;
+
+        let report = `=== 🍗 NodeSeek 签到运势详细分析 ===
+👤 用户信息：${userInfo}
+📅 统计时间：${new Date().toLocaleString()}
+📊 统计范围：${state.maxPage} 页 / ${totalDays} 次有效签到
+
+💰 【收益统计】
+   - 总收益：${total} 鸡腿
+   - 平均每日：${avg} 鸡腿
+   - 单日最高：${max}
+   - 单日最低：${min}
+
+🎲 【运势分析】
+   - 🌟 暴击天数(≥8)：${luckyDays} 天
+   - 🛡️ 保底天数(5腿)：${fiveCount} 天 (占比 ${fivePercent}%)
+
+🏆 【综合评级】
+   ${rating}`;
+
+        if (isConservative) {
+            report += `
+   🛡️ 特殊称号：【稳健保守派】
+      (说明：您有超过50%的签到获得了5鸡腿，主打一个稳稳的幸福)`;
+        } else if (isRadical) {
+            report += `
+   ⚔️ 特殊称号：【激进冒险派】
+      (说明：您获得5鸡腿的比例不足50%，说明您经常在欧皇和非酋之间反复横跳，拒绝平庸，此时无声胜有声！)`;
+        }
+
+        report += `
+
+💬 【AI点评】
+   ${getComment(parseFloat(avg), isConservative, isRadical)}
+
+--------------------------------
+📝 【等级对照表】
+   👑 欧神 (God) : 平均 ≥ 10
+   ☀️ 欧皇 (SSS) : 平均 ≥ 8.0
+   🌙 欧洲人 (S) : 平均 ≥ 6.5
+   ☁️ 普通人 (A) : 平均 ≥ 5.0
+   🌧️ 非酋 (B)   : 平均 ≥ 4.0
+   ⚡ 天谴之人 (C): 平均 < 4.0
+   🛡️ 保守派     : 5鸡腿占比 ≥ 50%
+   ⚔️ 激进派     : 5鸡腿占比 < 50%
+--------------------------------`;
+
+        return report;
+    }
+
+    function getRating(avg) {
+        if (avg >= 10) return "👑 欧神 (God) - 天选之子！";
+        if (avg >= 8.0) return "☀️ 欧皇 (SSS) - 运气爆棚！";
+        if (avg >= 6.5) return "🌙 欧洲人 (S) - 令人羡慕。";
+        if (avg >= 5.0) return "☁️ 普通人 (A) - 众生平等。";
+        if (avg >= 4.0) return "🌧️ 非酋 (B) - 略显尴尬...";
+        return "⚡ 天谴之人 (C) - 建议重开...";
+    }
+
+    function getComment(avg, isConservative, isRadical) {
+        if (avg >= 8) return "这种运气建议直接去买彩票，别在这里浪费时间了！";
+
+        if (isRadical) {
+             if (avg >= 6) return "虽然不常拿保底，但您的运气总体依然在线，是个敢打敢拼的赢家！";
+             return "您这签到记录真是跌宕起伏，看来您是个不喜欢按套路出牌的人，生活就该这样充满不确定性！";
+        }
+
+        if (isConservative) return "流水的大佬，铁打的5鸡腿。虽然没有暴富，但胜在细水长流，稳就完事了！";
+
+        if (avg >= 5) return "平平淡淡才是真，只要坚持签到，鸡腿总会有的。";
+        return "那个...要不咱们多发点技术贴或者整点活吧？靠签到可能发不了财...";
+    }
+
+    // --- 辅助功能 ---
+
+    function clearData() {
+        if(confirm('确定要清空所有已扫描的数据吗？')) {
+            allRecords = [];
+            state.isRunning = false;
+            state.targetPage = 1;
+            saveData();
+            saveState();
+
+            const panel = document.getElementById('ns-panel');
+            if (panel) panel.remove();
+            createControlPanel();
+        }
+    }
+
+    function updateUI() {
+        const countEl = document.getElementById('ns-count');
+        const pageEl = document.getElementById('ns-page-txt');
+        const barEl = document.getElementById('ns-bar');
+
+        if (countEl) countEl.innerText = allRecords.length;
+        if (pageEl) pageEl.innerText = `${state.targetPage} / ${state.maxPage}`;
+
+        if (barEl && state.maxPage > 0) {
+            const total = state.maxPage - state.startPage + 1;
+            const current = state.targetPage - state.startPage + 1;
+            const pct = Math.min(100, Math.max(0, (current / total) * 100));
+            barEl.style.width = `${pct}%`;
+        }
+    }
+
+    function updateStatus(text) {
+        const el = document.getElementById('ns-status');
+        if (el) el.innerText = text;
+    }
+
+    function saveState() { localStorage.setItem(KEY_STATE, JSON.stringify(state)); }
+    function saveData() { localStorage.setItem(KEY_DATA, JSON.stringify(allRecords)); }
+
+})();
